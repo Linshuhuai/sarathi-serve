@@ -36,6 +36,7 @@ class BenchmarkRunner:
         self.slo_attained_tokens = 0
         self.total_time = 0
         self.baseline_latency_ms = config.baseline_latency_ms
+        self.tpots = {}
 
         replica_config = ReplicaConfig(
             replica_id,
@@ -125,11 +126,15 @@ class BenchmarkRunner:
                     
                     # Calculate decode time
                     decode_time = (output.finished_at - output.prompt_processing_end) * 1000  # Convert to milliseconds
-                    
-                    slo_target = request.slo_ratio * self.baseline_latency_ms * request.num_decode_tokens
+                    tpot = decode_time / request.num_decode_tokens
+                    if request.slo_ratio not in self.tpots:
+                        self.tpots[request.slo_ratio] = []
+                    self.tpots[request.slo_ratio].append(tpot)
+
+                    slo_target = (request.slo_ratio * self.baseline_latency_ms if request.slo_ratio >= 0 else -request.slo_ratio) * request.num_decode_tokens
                     if decode_time <= slo_target:
                         self.slo_attained_requests += 1
-                        self.slo_attained_tokens += request.total_tokens
+                        self.slo_attained_tokens += request.num_decode_tokens
                     pbar.update(1)
 
         end_time = time.monotonic()
@@ -171,6 +176,7 @@ class BenchmarkRunner:
             "slo_attained_requests": self.slo_attained_requests,
             "slo_attained_tokens": self.slo_attained_tokens,
             "total_time": self.total_time,
+            "average_tpot": {slo_ratio: sum(tpots) / len(tpots) for slo_ratio, tpots in self.tpots.items()},
         }
 
 class BenchmarkRunnerLauncher:
@@ -296,10 +302,12 @@ class BenchmarkRunnerLauncher:
             f"SLO Attained Requests: {stats['slo_attained_requests']}\n"
             f"SLO Attained Tokens: {stats['slo_attained_tokens']}\n"
             f"Total Time: {stats['total_time']:.2f} seconds\n"
+            f"Tpot: {stats['average_tpot']}\n"
         )
         
     def _write_statistics_to_file(self, stats: dict) -> None:
         output_dir = self.config.output_dir
+        output_file = self.config.output_file
         os.makedirs(output_dir, exist_ok=True)
         stats_file = os.path.join(output_dir, "benchmark_statistics.txt")
         
@@ -308,10 +316,17 @@ class BenchmarkRunnerLauncher:
             f.write("\nRaw Statistics:\n")
             json.dump(stats, f, indent=2)
         
+        if output_file is not None:
+            with open(output_file, "w") as f:
+                f.write(self._format_statistics(stats))
+                f.write("\nRaw Statistics:\n")
+                json.dump(stats, f, indent=2)
+        
         logger.info(f"Statistics written to {stats_file}")
 
     def run(self):
         if self.is_multi_replica:
+            assert(False)
             ray.get([runner.warmup.remote() for runner in self.runners])
 
             runner_metrics = ray.get([runner.run.remote() for runner in self.runners])
